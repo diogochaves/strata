@@ -73,7 +73,7 @@ fn decode(operation: Operation) -> Result<(), String> {
     isolate_job().map_err(|e| e.to_string())?;
     protect_input(&["/tmp", "/dev/shm", "/dev/null"])?;
     crate::sandbox_helper::browser_render(std::path::Path::new("/proc/1/fd/0"), operation)
-        .write(&mut std::io::stdout())
+        .write(&mut std::io::stdout(), operation.output_limit())
         .map_err(|e| e.to_string())
 }
 

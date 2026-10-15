@@ -17,6 +17,8 @@ use std::{
 
 use gdk_pixbuf::prelude::*;
 
+use crate::services::ImagePreviewSize;
+
 use super::{
     bounded_output, bounded_output_with_timeout, bounded_surface_dimensions,
     exceeds_decoded_frame_budget, is_svg_head, pdf_render_request, read_exif_thumbnail,
@@ -214,7 +216,9 @@ fn oversized_images_exceeding_decoded_frame_budget_are_rejected_safely() {
 
     let preview_response = super::browser_render(
         &path,
-        crate::sandbox::browser::wire::Operation::PreviewImage,
+        crate::sandbox::browser::wire::Operation::PreviewImage(
+            crate::services::ImagePreviewSize::DEFAULT,
+        ),
     );
     assert!(preview_response.png.is_empty());
 }
@@ -327,8 +331,9 @@ fn oversized_images_with_exif_thumbnail_render_thumbnail_and_preview() {
         .expect("decode raw thumbnail png");
     assert_eq!((raw_pixbuf.width(), raw_pixbuf.height()), (32, 24));
 
-    let preview_png = super::document_media::image(&path, 800)
-        .expect("document_media::image with exif thumbnail");
+    let preview_png =
+        super::document_media::image(&path, crate::services::ImagePreviewSize::DEFAULT)
+            .expect("document_media::image with exif thumbnail");
     let preview_pixbuf = gdk_pixbuf::Pixbuf::from_read(std::io::Cursor::new(preview_png))
         .expect("decode preview png");
     assert_eq!((preview_pixbuf.width(), preview_pixbuf.height()), (32, 24));
@@ -361,7 +366,9 @@ fn oversized_images_with_exif_thumbnail_render_thumbnail_and_preview() {
 
     let preview_response = super::browser_render(
         &path,
-        crate::sandbox::browser::wire::Operation::PreviewImage,
+        crate::sandbox::browser::wire::Operation::PreviewImage(
+            crate::services::ImagePreviewSize::DEFAULT,
+        ),
     );
     assert!(!preview_response.png.is_empty());
 }
@@ -396,7 +403,8 @@ fn normal_images_with_exif_thumbnail_do_not_use_exif_thumbnail() {
     assert_eq!((thumb_pixbuf.width(), thumb_pixbuf.height()), (40, 40));
 
     let preview_png =
-        super::document_media::image(&path, 800).expect("document_media::image for normal image");
+        super::document_media::image(&path, crate::services::ImagePreviewSize::DEFAULT)
+            .expect("document_media::image for normal image");
     let preview_pixbuf = gdk_pixbuf::Pixbuf::from_read(std::io::Cursor::new(preview_png))
         .expect("decode preview png");
     assert_eq!((preview_pixbuf.width(), preview_pixbuf.height()), (40, 40));
@@ -406,6 +414,27 @@ fn normal_images_with_exif_thumbnail_do_not_use_exif_thumbnail() {
     let browser_pixbuf = gdk_pixbuf::Pixbuf::from_read(std::io::Cursor::new(response.png))
         .expect("decode browser png");
     assert_eq!((browser_pixbuf.width(), browser_pixbuf.height()), (40, 40));
+}
+
+#[test]
+fn preview_images_decode_to_their_box_and_never_past_the_source() {
+    let directory = tempfile::tempdir().expect("image fixture");
+    let path = directory.path().join("photo.png");
+    gdk_pixbuf::Pixbuf::new(gdk_pixbuf::Colorspace::Rgb, false, 8, 1200, 800)
+        .expect("fixture pixels")
+        .savev(&path, "png", &[])
+        .expect("write fixture");
+
+    for (bounds, expected) in [((600, 600), (600, 400)), ((4000, 4000), (1200, 800))] {
+        let size = ImagePreviewSize::new(bounds.0, bounds.1);
+        let response = super::browser_render(
+            &path,
+            crate::sandbox::browser::wire::Operation::PreviewImage(size),
+        );
+        let preview = gdk_pixbuf::Pixbuf::from_read(std::io::Cursor::new(response.png))
+            .expect("decode preview png");
+        assert_eq!((preview.width(), preview.height()), expected);
+    }
 }
 
 #[test]

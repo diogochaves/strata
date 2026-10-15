@@ -215,7 +215,11 @@ fn load_folder_art(
     if let Some(cached) = cached.filter(|cached| cached.version == version) {
         return Some(Some(cached.cover));
     }
-    let cover = texture(parse(&path, ParseOperation::PreviewImage, job)?)?;
+    let cover = texture(parse(
+        &path,
+        ParseOperation::PreviewImage(crate::services::ImagePreviewSize::DEFAULT),
+        job,
+    )?)?;
     if !job.is_cancelled() {
         cache.lock().expect("folder artwork cache").insert(
             path,

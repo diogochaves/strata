@@ -383,7 +383,7 @@ fn image_sandboxes_resolve_debian_imagemagick_alternatives() {
         Path::new("/tmp/strata"),
         Path::new("/home/alice/Pictures/untrusted.heic"),
         Path::new("/tmp/private-output"),
-        ParseOperation::PreviewImage,
+        ParseOperation::PreviewImage(crate::services::ImagePreviewSize::DEFAULT),
         0,
         MediaPreviewBackend::Software,
         &[],
@@ -834,21 +834,30 @@ fn video_thumbnails_execute_the_helper_inside_the_bounded_sandbox() {
 #[test]
 fn accepts_only_bounded_png_outputs_and_never_compressed_media() {
     assert!(valid_output(ParseOperation::AudioCover, b"null"));
-    assert!(!valid_output(ParseOperation::PreviewImage, b"null"));
+    assert!(!valid_output(
+        ParseOperation::PreviewImage(crate::services::ImagePreviewSize::DEFAULT),
+        b"null"
+    ));
     assert!(!valid_output(ParseOperation::AudioCover, b""));
     assert!(!valid_output(ParseOperation::AudioCover, b"null trailing"));
     assert!(valid_output(ParseOperation::AudioCover, &png(800, 800)));
     assert!(!valid_output(ParseOperation::AudioCover, &png(801, 800)));
     assert!(valid_output(ParseOperation::ThumbnailImage, &png(256, 256)));
     assert!(!valid_output(ParseOperation::ThumbnailImage, &png(257, 1)));
-    assert!(valid_output(ParseOperation::PreviewImage, &png(800, 800)));
-    assert!(!valid_output(ParseOperation::PreviewImage, &png(801, 1)));
+    assert!(valid_output(
+        ParseOperation::PreviewImage(crate::services::ImagePreviewSize::DEFAULT),
+        &png(800, 800)
+    ));
+    assert!(!valid_output(
+        ParseOperation::PreviewImage(crate::services::ImagePreviewSize::DEFAULT),
+        &png(801, 1)
+    ));
     assert!(valid_output(PDF_PREVIEW.clone(), &png(640, 800)));
     assert!(!valid_output(PDF_PREVIEW.clone(), &png(641, 799)));
     assert!(!valid_output(PDF_PREVIEW.clone(), &png(640, 801)));
     assert!(!valid_output(PDF_PREVIEW.clone(), &png(0, 100)));
     assert!(!valid_output(
-        ParseOperation::PreviewImage,
+        ParseOperation::PreviewImage(crate::services::ImagePreviewSize::DEFAULT),
         b"\x89PNG\r\n\x1a\n"
     ));
     assert!(!valid_output(
@@ -900,7 +909,7 @@ fn cancelled_requests_fail_without_starting_a_renderer() {
     cancellation.cancel();
     let error = parse(
         Path::new("does-not-need-to-exist"),
-        ParseOperation::PreviewImage,
+        ParseOperation::PreviewImage(crate::services::ImagePreviewSize::DEFAULT),
         0,
         MediaPreviewBackend::Software,
         &cancellation,
@@ -985,7 +994,7 @@ fn archive_parse_infra_failures_report_renderer_failure() {
 
     let error = parse(
         Path::new("does-not-need-to-exist.png"),
-        ParseOperation::PreviewImage,
+        ParseOperation::PreviewImage(crate::services::ImagePreviewSize::DEFAULT),
         0,
         MediaPreviewBackend::Software,
         &Cancellation::default(),

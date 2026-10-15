@@ -74,9 +74,10 @@ pub use operations::{
 };
 pub(crate) use path_match::{PathMatcher, PathQuery};
 pub use preview::{
-    ArchiveDirectory, ArchiveFileEntry, ArchiveNode, ArchivePreviewTree, MediaPreviewSize,
-    ModelPreviewStage, PdfTextLayer, Preview, PreviewContent, PreviewEvent, PreviewProvider,
-    PreviewRequest, PreviewRequestId, SandboxedMedia, SecretString, archive_preview_tree,
+    ArchiveDirectory, ArchiveFileEntry, ArchiveNode, ArchivePreviewTree, ImagePreviewSize,
+    MediaPreviewSize, ModelPreviewStage, PdfTextLayer, Preview, PreviewContent, PreviewEvent,
+    PreviewProvider, PreviewRequest, PreviewRequestId, SandboxedMedia, SecretString,
+    archive_preview_tree,
 };
 pub(crate) use preview::{
     INCORRECT_ARCHIVE_PASSWORD, archive_preview_format, bytes_support_named_family, content_family,

@@ -45,13 +45,26 @@ fn descriptor_transport_preserves_the_open_file_not_its_replacement() {
 }
 
 #[test]
+fn preview_requests_carry_their_decode_box_to_the_worker() {
+    let file = tempfile::tempfile().expect("input");
+    let size = crate::services::ImagePreviewSize::new(3840, 2160);
+    let (parent, child) = UnixStream::pair().expect("socket");
+    let (_read, write) =
+        rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).expect("reply pipe");
+    wire::send(&parent, &file, &write, Operation::PreviewImage(size)).expect("send");
+    let (operation, _, _) = wire::receive(&child).expect("receive").expect("request");
+    assert_eq!(operation, Operation::PreviewImage(size));
+    assert!(Operation::parse(&[7]).is_err());
+}
+
+#[test]
 fn descriptor_transport_rejects_missing_descriptors_and_unknown_operations() {
     for operation in [1, 255] {
         let (mut parent, child) = UnixStream::pair().expect("socket");
         parent.write_all(&[operation]).expect("send");
         assert!(wire::receive(&child).is_err());
     }
-    assert!(Operation::parse(0).is_err());
+    assert!(Operation::parse(&[0]).is_err());
 }
 
 #[test]
@@ -61,14 +74,16 @@ fn response_transport_bounds_allocations_and_rejects_truncation() {
         metadata: b"details".to_vec(),
     };
     let mut bytes = Vec::new();
-    response.write(&mut bytes).expect("encode");
+    response
+        .write(&mut bytes, wire::MAX_OUTPUT_BYTES)
+        .expect("encode");
     for end in 0..bytes.len() {
-        assert!(Response::read(&mut &bytes[..end]).is_err());
+        assert!(Response::read(&mut &bytes[..end], wire::MAX_OUTPUT_BYTES).is_err());
     }
-    let decoded = Response::read(&mut bytes.as_slice()).expect("decode");
+    let decoded = Response::read(&mut bytes.as_slice(), wire::MAX_OUTPUT_BYTES).expect("decode");
     assert_eq!(decoded.png, response.png);
     assert_eq!(decoded.metadata, response.metadata);
-    assert!(Response::read(&mut [255; 8].as_slice()).is_err());
+    assert!(Response::read(&mut [255; 8].as_slice(), wire::MAX_OUTPUT_BYTES).is_err());
 }
 
 #[test]
@@ -141,7 +156,11 @@ fn preview_renders_do_not_evict_thumbnail_cache_entries() {
     let previews = Mutex::new(Cache::default());
     let thumbnail = cache_entry(&thumbnails, key(0), Operation::Image);
     for index in 1..=(CACHE_ENTRIES as u64 + 1) {
-        cache_entry(&previews, key(index), Operation::PreviewImage);
+        cache_entry(
+            &previews,
+            key(index),
+            Operation::PreviewImage(crate::services::ImagePreviewSize::DEFAULT),
+        );
     }
     assert!(Arc::ptr_eq(
         &thumbnail,
@@ -205,7 +224,11 @@ fn file_versions_invalidate_cached_work_after_replacement() {
         &cache_entry(&cache, second.clone(), Operation::Image)
     ));
     assert!(!Arc::ptr_eq(
-        &cache_entry(&cache, second.clone(), Operation::PreviewImage),
+        &cache_entry(
+            &cache,
+            second.clone(),
+            Operation::PreviewImage(crate::services::ImagePreviewSize::DEFAULT)
+        ),
         &cache_entry(&cache, second, Operation::Image)
     ));
 }
@@ -677,9 +700,12 @@ fn preview_operations_render_inside_the_decoder() {
     .expect("fixture");
     let cancellation = Cancellation::default();
     assert!(preview(&path, &ParseOperation::ThumbnailImage, &cancellation).is_none());
-    let response = crate::sandbox_helper::browser_render(&path, Operation::PreviewImage);
+    let response = crate::sandbox_helper::browser_render(
+        &path,
+        Operation::PreviewImage(crate::services::ImagePreviewSize::DEFAULT),
+    );
     assert!(super::super::valid_output(
-        ParseOperation::PreviewImage,
+        ParseOperation::PreviewImage(crate::services::ImagePreviewSize::DEFAULT),
         &response.png
     ));
     let tex = directory.path().join("equation.tex");

@@ -36,6 +36,57 @@ impl MediaPreviewSize {
     }
 }
 
+/// The box, in device pixels, that an image preview is decoded to fit.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ImagePreviewSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl ImagePreviewSize {
+    /// Covers and images embedded in documents keep this fixed bound.
+    pub const DEFAULT: Self = Self {
+        width: 800,
+        height: 800,
+    };
+    pub const MAX_EDGE: u32 = 16_384;
+    /// A zoomed decode is one whole-image texture, so this caps it at 128 MiB.
+    pub const MAX_PIXELS: u64 = 32 * 1024 * 1024;
+
+    pub fn new(width: i32, height: i32) -> Self {
+        let clamp = |edge: i32| edge.clamp(16, Self::MAX_EDGE as i32) as u32;
+        let (width, height) = (clamp(width), clamp(height));
+        let pixels = u64::from(width) * u64::from(height);
+        if pixels <= Self::MAX_PIXELS {
+            return Self { width, height };
+        }
+        let scale = (Self::MAX_PIXELS as f64 / pixels as f64).sqrt();
+        let shrink = |edge: u32| ((f64::from(edge) * scale).floor() as u32).max(16);
+        Self {
+            width: shrink(width),
+            height: shrink(height),
+        }
+    }
+
+    pub fn for_viewport(width: i32, height: i32, scale: i32) -> Self {
+        Self::new(width.saturating_mul(scale), height.saturating_mul(scale))
+    }
+
+    /// The largest size that keeps `source`'s proportions inside this box, never
+    /// larger than `source` itself.
+    pub fn fit(self, source_width: u32, source_height: u32) -> (u32, u32) {
+        let source_width = source_width.max(1);
+        let source_height = source_height.max(1);
+        let scale = (f64::from(self.width) / f64::from(source_width))
+            .min(f64::from(self.height) / f64::from(source_height))
+            .min(1.0);
+        (
+            ((f64::from(source_width) * scale).floor() as u32).max(1),
+            ((f64::from(source_height) * scale).floor() as u32).max(1),
+        )
+    }
+}
+
 /// Redacts diagnostic output; does not scrub plaintext from memory.
 #[derive(Clone, Eq, PartialEq)]
 pub struct SecretString(String);
@@ -64,6 +115,7 @@ pub struct PreviewRequest {
     pub render_document: bool,
     pub pdf_page: i32,
     pub media_size: MediaPreviewSize,
+    pub image_size: ImagePreviewSize,
     pub model_palette: super::ModelPalette,
     pub archive_password: Option<SecretString>,
 }

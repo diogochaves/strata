@@ -16,9 +16,9 @@ use crate::{
     app::{Browser, BrowserEvent},
     model::{EntryKind, FileEntry, MetadataValue},
     services::{
-        ArchivePreviewTree, DocumentLayout, LoadHandle, MediaPreviewSize, PdfTextLayer, Preview,
-        PreviewContent, PreviewEvent, PreviewProvider, PreviewRequest, PreviewRequestId,
-        SecretString, normalize_preview_text,
+        ArchivePreviewTree, DocumentLayout, ImagePreviewSize, LoadHandle, MediaPreviewSize,
+        PdfTextLayer, Preview, PreviewContent, PreviewEvent, PreviewProvider, PreviewRequest,
+        PreviewRequestId, SecretString, normalize_preview_text,
     },
 };
 
@@ -38,6 +38,7 @@ mod archive;
 pub(super) mod audio;
 mod ease_in;
 mod find;
+mod image_view;
 mod keyboard;
 mod layout;
 pub(in crate::ui) use layout::{separator, separator_width};
@@ -217,6 +218,9 @@ struct PreviewState {
     loading_delay: RefCell<Option<glib::SourceId>>,
     loading_label: RefCell<Option<gtk::Label>>,
     pdf_loads: Rc<RefCell<HashMap<i32, LoadHandle>>>,
+    image_view: RefCell<Option<image_view::ImageView>>,
+    image_size: Cell<ImagePreviewSize>,
+    image_refine: RefCell<Option<LoadHandle>>,
     print_load: RefCell<Option<LoadHandle>>,
     print_progress: RefCell<Option<PrintProgress>>,
     print_request: Cell<Option<PreviewRequestId>>,
@@ -447,6 +451,9 @@ impl PreviewDrawer {
             loading_delay: RefCell::new(None),
             loading_label: RefCell::new(None),
             pdf_loads: Rc::new(RefCell::new(HashMap::new())),
+            image_view: RefCell::default(),
+            image_size: Cell::new(ImagePreviewSize::DEFAULT),
+            image_refine: RefCell::default(),
             print_load: RefCell::new(None),
             print_progress: RefCell::new(None),
             print_request: Cell::new(None),
@@ -1142,6 +1149,7 @@ impl PreviewState {
                 render_document: false,
                 pdf_page,
                 media_size: self.media_preview_size(),
+                image_size: crate::services::ImagePreviewSize::DEFAULT,
                 model_palette: super::theme::ThemeManager::shared().active_model_palette(),
                 archive_password: None,
             },
@@ -1238,6 +1246,25 @@ impl PreviewState {
     }
 
     fn media_preview_size(&self) -> MediaPreviewSize {
+        let (width, height) = self.preview_viewport();
+        MediaPreviewSize::for_viewport(
+            width.min(media_layout::MAX_CONTENT_WIDTH),
+            height,
+            self.pane.scale_factor(),
+        )
+    }
+
+    fn image_preview_size(&self) -> ImagePreviewSize {
+        let (width, height) = self.preview_viewport();
+        let margin = image_view::MARGIN as i32 * 2;
+        ImagePreviewSize::for_viewport(
+            width.saturating_sub(margin),
+            height.saturating_sub(margin),
+            self.pane.scale_factor(),
+        )
+    }
+
+    fn preview_viewport(&self) -> (i32, i32) {
         let split = self.split.borrow();
         let width = split
             .as_ref()
@@ -1266,11 +1293,7 @@ impl PreviewState {
                 .filter(|height| *height > 0)
                 .unwrap_or(DEFAULT_WIDTH)
         };
-        MediaPreviewSize::for_viewport(
-            width.min(media_layout::MAX_CONTENT_WIDTH),
-            height,
-            self.pane.scale_factor(),
-        )
+        (width, height)
     }
 
     fn retain_pending_playback(&self, entry: &FileEntry) {
@@ -1356,6 +1379,8 @@ impl PreviewState {
             self.focus_archive_request.set(Some(request_id));
         }
         self.show_loading(request_id);
+        let image_size = self.image_preview_size();
+        self.image_size.set(image_size);
         let weak = Rc::downgrade(self);
         let emit = Rc::new(move |event| {
             let Some(state) = weak.upgrade() else {
@@ -1371,6 +1396,7 @@ impl PreviewState {
                 render_document,
                 pdf_page,
                 media_size: self.media_preview_size(),
+                image_size,
                 model_palette: super::theme::ThemeManager::shared().active_model_palette(),
                 archive_password,
             },
@@ -1590,6 +1616,13 @@ impl PreviewState {
                     super::virtual_preview::rendered_document(document, warnings, false, None);
                 self.rendered_text.replace(Some(state));
                 self.content.append(&view);
+            }
+            PreviewContent::Rasterized { png }
+                if preview.content_type.starts_with("image/")
+                    && !crate::services::is_model(&preview.entry.native_name) =>
+            {
+                self.print.set_visible(true);
+                self.show_image(preview.entry, png);
             }
             PreviewContent::Rasterized { png } | PreviewContent::Model { png, .. } => {
                 let model = crate::services::is_model(&preview.entry.native_name);
@@ -2029,6 +2062,64 @@ impl PreviewState {
         (overlay, center_play)
     }
 
+    fn show_image(self: &Rc<Self>, entry: FileEntry, png: Vec<u8>) {
+        let view = image_view::ImageView::new();
+        view.set_file_drag(install_preview_drag(view.frame(), self));
+        let weak = Rc::downgrade(self);
+        view.set_refine(Rc::new(move |size| {
+            if let Some(state) = weak.upgrade() {
+                state.refine_image(entry.clone(), size);
+            }
+        }));
+        self.content.append(&view);
+        self.image_view.replace(Some(view.clone()));
+        let weak = Rc::downgrade(self);
+        decode_image(&view, png, self.image_size.get(), move || {
+            if let Some(state) = weak.upgrade() {
+                state.show_message(
+                    &crate::i18n::tr("Preview unavailable"),
+                    &crate::i18n::tr("The sandboxed renderer returned no preview"),
+                );
+            }
+        });
+    }
+
+    /// Decodes the shown image again to fit `size`, swapping it in when it lands.
+    fn refine_image(self: &Rc<Self>, entry: FileEntry, size: ImagePreviewSize) {
+        let Some(view) = self.image_view.borrow().clone() else {
+            return;
+        };
+        let request_id = PreviewRequestId(self.next_request.get());
+        self.next_request
+            .set(self.next_request.get().saturating_add(1));
+        let weak = view.downgrade();
+        let emit = Rc::new(move |event| {
+            if let PreviewEvent::Ready(Preview {
+                content: PreviewContent::Rasterized { png },
+                ..
+            }) = event
+                && let Some(view) = weak.upgrade()
+            {
+                decode_image(&view, png, size, || {});
+            }
+        });
+        let load = self.provider.load(
+            PreviewRequest {
+                id: request_id,
+                entry,
+                text_byte_limit: TEXT_BYTE_LIMIT,
+                render_document: false,
+                pdf_page: 0,
+                media_size: self.media_preview_size(),
+                image_size: size,
+                model_palette: super::theme::ThemeManager::shared().active_model_palette(),
+                archive_password: None,
+            },
+            emit,
+        );
+        self.image_refine.replace(Some(load));
+    }
+
     fn render_pdf_viewer(
         self: &Rc<Self>,
         entry: FileEntry,
@@ -2259,6 +2350,7 @@ impl PreviewState {
                     render_document: false,
                     pdf_page: page_index,
                     media_size: render_size,
+                    image_size: crate::services::ImagePreviewSize::DEFAULT,
                     model_palette: super::theme::ThemeManager::shared().active_model_palette(),
                     archive_password: None,
                 },
@@ -2971,6 +3063,8 @@ impl PreviewState {
         self.wrap.set_visible(false);
         self.text_view.take();
         self.text_scroll.take();
+        self.image_refine.take();
+        self.image_view.take();
         self.archive_browser.take();
         self.clear_password_entry();
         match (keep, audio, video) {
@@ -4150,7 +4244,33 @@ fn preview_drag_entries(entry: Option<&FileEntry>) -> Option<Vec<FileEntry>> {
     entry.cloned().map(|entry| vec![entry])
 }
 
-fn install_preview_drag(widget: &impl IsA<gtk::Widget>, state: &Rc<PreviewState>) {
+/// Decodes off the main thread: a pane-sized PNG takes long enough to stall input.
+fn decode_image(
+    view: &image_view::ImageView,
+    png: Vec<u8>,
+    decoded: ImagePreviewSize,
+    on_failure: impl FnOnce() + 'static,
+) {
+    let weak = view.downgrade();
+    glib::spawn_future_local(async move {
+        let texture = gio::spawn_blocking(move || {
+            gtk::gdk::Texture::from_bytes(&glib::Bytes::from_owned(png))
+        })
+        .await;
+        let Some(view) = weak.upgrade() else {
+            return;
+        };
+        match texture {
+            Ok(Ok(texture)) => view.set_texture(texture, decoded),
+            _ => on_failure(),
+        }
+    });
+}
+
+fn install_preview_drag(
+    widget: &impl IsA<gtk::Widget>,
+    state: &Rc<PreviewState>,
+) -> gtk::DragSource {
     let drag = gtk::DragSource::builder()
         .actions(gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE)
         .build();
@@ -4180,5 +4300,6 @@ fn install_preview_drag(widget: &impl IsA<gtk::Widget>, state: &Rc<PreviewState>
             super::browser::slide_out(&state.content);
         }
     });
-    widget.add_controller(drag);
+    widget.add_controller(drag.clone());
+    drag
 }

@@ -16,7 +16,7 @@ use std::{
 use rustix::process::{Pid, Signal, kill_process_group};
 
 use crate::services::{
-    ArchiveFormat, MediaPreviewSize, ModelFormat, ModelRender, SecretString,
+    ArchiveFormat, ImagePreviewSize, MediaPreviewSize, ModelFormat, ModelRender, SecretString,
     model_preview::MAX_MODEL_INPUT_BYTES,
 };
 
@@ -33,6 +33,12 @@ pub(crate) const FILE_SIZE_LIMIT_BYTES: u64 = 512 * 1024 * 1024;
 const TEMPORARY_STORAGE_LIMIT_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_RASTER_INPUT_BYTES: u64 = 512 * 1024 * 1024;
 pub(crate) const MAX_OUTPUT_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Incompressible 8-bit RGBA plus PNG framing, never below the shared bound.
+pub(crate) fn preview_image_output_limit(size: ImagePreviewSize) -> u64 {
+    let pixels = u64::from(size.width) * u64::from(size.height);
+    (pixels * 4 + pixels / 8 + 1024 * 1024).max(MAX_OUTPUT_BYTES)
+}
 pub(crate) const MAX_TEXT_LAYER_BYTES: u64 = 8 * 1024 * 1024;
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -140,7 +146,7 @@ pub(crate) enum ParseOperation {
     ThumbnailModel(ModelFormat),
     ThumbnailCover(CoverFormat),
     PreviewCover(CoverFormat),
-    PreviewImage,
+    PreviewImage(ImagePreviewSize),
     InspectImage,
     ConvertImage,
     DocumentImage,
@@ -179,7 +185,7 @@ impl ParseOperation {
             Self::ThumbnailModel(_) => "thumbnail-model",
             Self::ThumbnailCover(_) => "thumbnail-cover",
             Self::PreviewCover(_) => "preview-cover",
-            Self::PreviewImage => "preview-image",
+            Self::PreviewImage(_) => "preview-image",
             Self::InspectImage => "inspect-image",
             Self::ConvertImage => "convert-image",
             Self::DocumentImage => "document-image",
@@ -261,10 +267,14 @@ impl ParseOperation {
                 crate::services::image_conversion::MAX_EDGE,
                 crate::services::image_conversion::MAX_PIXELS,
             )),
-            Self::PreviewImage
-            | Self::DocumentImage
-            | Self::DocumentMermaid
-            | Self::DocumentMath { .. } => Some((800, 800, 800 * 800)),
+            Self::PreviewImage(size) => Some((
+                size.width,
+                size.height,
+                u64::from(size.width) * u64::from(size.height),
+            )),
+            Self::DocumentImage | Self::DocumentMermaid | Self::DocumentMath { .. } => {
+                Some((800, 800, 800 * 800))
+            }
             Self::PreviewPdf(size) => Some(size.image_limits()),
             Self::PreviewModel(render) => {
                 let size = MediaPreviewSize::new(render.size.width, render.size.height);
@@ -289,7 +299,7 @@ impl ParseOperation {
             Self::ThumbnailImage
             | Self::ThumbnailRaw
             | Self::ThumbnailPdf
-            | Self::PreviewImage
+            | Self::PreviewImage(_)
             | Self::RawMetadata
             | Self::PreviewPdf(_) => Some(MAX_RASTER_INPUT_BYTES),
             Self::PreviewModel(_) | Self::ThumbnailModel(_) => Some(MAX_MODEL_INPUT_BYTES),
@@ -534,6 +544,8 @@ fn parse_sandboxed(
         ParseOperation::MediaMetadata | ParseOperation::AudioTags | ParseOperation::RawMetadata
     ) {
         metadata::MAX_METADATA_BYTES
+    } else if let ParseOperation::PreviewImage(size) = operation {
+        preview_image_output_limit(size)
     } else {
         MAX_OUTPUT_BYTES
     };
@@ -856,6 +868,7 @@ fn sandbox_command(
                 render.palette.accent,
                 render.palette.surface,
             ),
+            ParseOperation::PreviewImage(size) => format!("{}x{}", size.width, size.height),
             ParseOperation::ThumbnailModel(format) => format.argument().to_owned(),
             ParseOperation::ThumbnailCover(format) => format.argument().to_owned(),
             ParseOperation::PreviewCover(format) => format.argument().to_owned(),

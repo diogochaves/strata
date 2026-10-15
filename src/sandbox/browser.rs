@@ -17,7 +17,7 @@ use std::{
 };
 
 use super::{Cancellation, ParseOperation, metadata::MediaMetadata};
-use crate::services::ModelFormat;
+use crate::services::{ImagePreviewSize, ModelFormat};
 use wire::{Operation, Response};
 
 mod process;
@@ -27,6 +27,9 @@ pub(crate) use worker::run;
 
 const CACHE_ENTRIES: usize = 64;
 const CACHE_TTL: Duration = Duration::from_secs(30);
+// Entries outlive their TTL until evicted, so a pane-sized preview is not kept here;
+// the preview layer caches it with a byte budget instead.
+const CACHED_PNG_LIMIT: usize = 4 * 1024 * 1024;
 const WAIT_QUANTUM: Duration = Duration::from_millis(20);
 pub(crate) const MAX_WORKERS: usize = 16;
 const DEFAULT_WORKER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -198,7 +201,8 @@ pub(crate) fn preview(
     cancellation: &Cancellation,
 ) -> Option<Result<Vec<u8>, String>> {
     let operation = match operation {
-        ParseOperation::PreviewImage | ParseOperation::DocumentImage => Operation::PreviewImage,
+        ParseOperation::PreviewImage(size) => Operation::PreviewImage(*size),
+        ParseOperation::DocumentImage => Operation::PreviewImage(ImagePreviewSize::DEFAULT),
         ParseOperation::DocumentMermaid => Operation::DocumentMermaid,
         ParseOperation::DocumentMath { display: true } => Operation::DocumentMath,
         ParseOperation::DocumentMath { display: false } => Operation::DocumentMathInline,
@@ -215,7 +219,7 @@ pub(crate) fn preview(
 
 fn invalid_output_label(operation: Operation) -> &'static str {
     match operation {
-        Operation::PreviewImage
+        Operation::PreviewImage(_)
         | Operation::DocumentMermaid
         | Operation::DocumentMath
         | Operation::DocumentMathInline => "Invalid preview render",
@@ -232,7 +236,7 @@ fn parse_operation(operation: Operation) -> ParseOperation {
         Operation::ThreeMfThumbnail => ParseOperation::ThumbnailModel(ModelFormat::ThreeMf),
         Operation::FreeCadThumbnail => ParseOperation::ThumbnailModel(ModelFormat::FreeCad),
         Operation::ImageMetadata | Operation::MediaMetadata => ParseOperation::MediaMetadata,
-        Operation::PreviewImage => ParseOperation::PreviewImage,
+        Operation::PreviewImage(size) => ParseOperation::PreviewImage(size),
         Operation::DocumentMermaid => ParseOperation::DocumentMermaid,
         Operation::DocumentMath => ParseOperation::DocumentMath { display: true },
         Operation::DocumentMathInline => ParseOperation::DocumentMath { display: false },
@@ -287,6 +291,7 @@ fn request(
     {
         *cached = Cached::default();
     }
+    let mut uncached_png = None;
     let hit = if metadata_only {
         cached.metadata.is_some() || cached.failed_metadata
     } else {
@@ -305,13 +310,17 @@ fn request(
             return Err("Browser input changed while rendering".into());
         }
         if !response.png.is_empty() {
-            if response.png.len() as u64 > wire::MAX_OUTPUT_BYTES
+            if response.png.len() as u64 > operation.output_limit()
                 || !super::valid_output(parse_operation(operation), &response.png)
             {
                 lease.discard();
                 return Err(invalid_output_label(operation).into());
             }
-            cached.png = Some(response.png);
+            if response.png.len() <= CACHED_PNG_LIMIT {
+                cached.png = Some(response.png);
+            } else {
+                uncached_png = Some(response.png);
+            }
         } else if !metadata_only {
             cached.failed_thumbnail = true;
         }
@@ -342,7 +351,9 @@ fn request(
         return Err("Browser request cancelled".into());
     }
     Ok(ResultParts {
-        png: (!metadata_only).then(|| cached.png.clone()).flatten(),
+        png: (!metadata_only)
+            .then(|| uncached_png.or_else(|| cached.png.clone()))
+            .flatten(),
         metadata: cached.metadata.clone(),
     })
 }
@@ -826,7 +837,7 @@ impl ProcessWorker {
             deadline,
             cancellation,
         };
-        let response = Response::read(&mut reader);
+        let response = Response::read(&mut reader, operation.output_limit());
         if response
             .as_ref()
             .is_err_and(|error| error.kind() != io::ErrorKind::UnexpectedEof)

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 
 use resvg::{tiny_skia, usvg};
+
+use crate::services::ImagePreviewSize;
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -8,14 +10,14 @@ use std::{
     process::Command,
 };
 
-pub(super) fn image(path: &Path, edge: u32) -> Result<Vec<u8>, String> {
+pub(super) fn image(path: &Path, bounds: ImagePreviewSize) -> Result<Vec<u8>, String> {
     // Other loaders accept SVG dialects resvg rejects.
     if let Some(source) = super::svg_source(path)
-        && let Ok(rendered) = svg(&source, edge)
+        && let Ok(rendered) = svg_within(&source, bounds)
     {
         return Ok(rendered.png);
     }
-    super::render_raw(path, edge as i32)
+    super::render_raw_within(path, bounds)
 }
 
 pub(super) fn mermaid(path: &Path) -> Result<Vec<u8>, String> {
@@ -83,6 +85,17 @@ pub(super) struct RenderedSvg {
 }
 
 pub(super) fn svg(source: &str, edge: u32) -> Result<RenderedSvg, String> {
+    let edge = edge.clamp(1, 800);
+    svg_within(
+        source,
+        ImagePreviewSize {
+            width: edge,
+            height: edge,
+        },
+    )
+}
+
+fn svg_within(source: &str, bounds: ImagePreviewSize) -> Result<RenderedSvg, String> {
     let mut options = svg_options();
     if source.contains("<text") {
         load_text_fonts(source, &mut options);
@@ -113,10 +126,12 @@ pub(super) fn svg(source: &str, edge: u32) -> Result<RenderedSvg, String> {
     }
     let tree = usvg::Tree::from_str(source, &options).map_err(|error| error.to_string())?;
     let size = tree.size();
-    let edge = edge.clamp(1, 800) as f32;
-    let scale = (edge / size.width().max(size.height())).min(1.0);
-    let width = (size.width() * scale).ceil().clamp(1.0, edge) as u32;
-    let height = (size.height() * scale).ceil().clamp(1.0, edge) as u32;
+    let (max_width, max_height) = (bounds.width.max(1) as f32, bounds.height.max(1) as f32);
+    let scale = (max_width / size.width())
+        .min(max_height / size.height())
+        .min(1.0);
+    let width = (size.width() * scale).ceil().clamp(1.0, max_width) as u32;
+    let height = (size.height() * scale).ceil().clamp(1.0, max_height) as u32;
     let mut pixmap = tiny_skia::Pixmap::new(width, height).ok_or("Cannot allocate image")?;
     resvg::render(
         &tree,

@@ -50,6 +50,7 @@ fn comic_and_epub_requests_render_covers_instead_of_archive_trees() {
                 render_document: false,
                 pdf_page: 0,
                 media_size: MediaPreviewSize::new(800, 800),
+                image_size: crate::services::ImagePreviewSize::DEFAULT,
                 model_palette: ModelPalette::default(),
                 archive_password: None,
             },

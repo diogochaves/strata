@@ -156,7 +156,18 @@ pub(super) fn step_preview_volume(delta: f64) {
 }
 
 impl PreviewDrawer {
+    /// Also resets a zoomed image, whose pane never takes keyboard focus.
     pub(in crate::ui) fn reset_pdf_zoom(&self, press: &KeyPress) -> bool {
+        if press.is(PDF_ZOOM_RESET)
+            && self
+                .state
+                .image_view
+                .borrow()
+                .as_ref()
+                .is_some_and(|view| view.reset_if_zoomed())
+        {
+            return true;
+        }
         press.is(PDF_ZOOM_RESET)
             && self
                 .state

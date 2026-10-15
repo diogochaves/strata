@@ -19,11 +19,11 @@ use crate::{
     },
     sandbox::{Cancellation, MediaPreviewBackend, ParseOperation, PdfRenderSize},
     services::{
-        LoadHandle, MediaPreviewSize, ModelFormat, ModelRender, Preview, PreviewContent,
-        PreviewEvent, PreviewProvider, PreviewRequest, SandboxedMedia, content_family,
-        document_kind, has_plain_text_extension, is_non_executable_extensionless_dotfile,
-        layout_document, looks_like_text, normalize_preview_text, parse_document, read_head_sample,
-        reconcile_with_sample,
+        ImagePreviewSize, LoadHandle, MediaPreviewSize, ModelFormat, ModelRender, Preview,
+        PreviewContent, PreviewEvent, PreviewProvider, PreviewRequest, SandboxedMedia,
+        content_family, document_kind, has_plain_text_extension,
+        is_non_executable_extensionless_dotfile, layout_document, looks_like_text,
+        normalize_preview_text, parse_document, read_head_sample, reconcile_with_sample,
     },
 };
 
@@ -119,6 +119,7 @@ struct PreviewCacheKey {
     modified: i64,
     pdf_page: Option<(i32, PdfRenderSize)>,
     model: Option<ModelRender>,
+    image: Option<ImagePreviewSize>,
 }
 
 impl PreviewCache {
@@ -134,6 +135,10 @@ impl PreviewCache {
             return;
         }
         let bytes = preview_content_size(&content);
+        // One zoomed image would otherwise evict every other preview.
+        if bytes > MAX_PREVIEW_CACHE_BYTES / 4 {
+            return;
+        }
         self.recent.retain(|k| k != &key);
         if let Some(old) = self.entries.remove(&key) {
             self.byte_count = self.byte_count.saturating_sub(preview_content_size(&old));
@@ -547,7 +552,7 @@ impl LocalPreviewProvider {
                 PreviewContent::Pdf { .. } => Some(ParseOperation::PreviewPdf(pdf_render_size(
                     request.media_size,
                 ))),
-                PreviewContent::Image => Some(ParseOperation::PreviewImage),
+                PreviewContent::Image => Some(ParseOperation::PreviewImage(request.image_size)),
                 PreviewContent::Media => None,
                 PreviewContent::Text { .. }
                 | PreviewContent::Model { .. }
@@ -560,7 +565,7 @@ impl LocalPreviewProvider {
             }};
             if let Some(operation) = &operation {
                 let staged = if entry.location.native_path().is_none() {
-                    if !matches!(operation, ParseOperation::PreviewImage) {
+                    if !matches!(operation, ParseOperation::PreviewImage(_)) {
                         emit(PreviewEvent::Failed {
                             request_id,
                             entry,
@@ -607,11 +612,16 @@ impl LocalPreviewProvider {
                     ParseOperation::PreviewPdf(size) => Some((request.pdf_page, *size)),
                     _ => None,
                 };
+                let image = match operation {
+                    ParseOperation::PreviewImage(size) => Some(*size),
+                    _ => None,
+                };
                 let cache_key = modified.map(|modified| PreviewCacheKey {
                     path: path.clone(),
                     modified,
                     pdf_page,
                     model,
+                    image,
                 });
                 if let Some(cached) = cache_key
                     .as_ref()
@@ -720,7 +730,10 @@ impl LocalPreviewProvider {
                 }));
                 if let Some((path, mtime, png)) = thumbnail_to_store {
                     let _ = gio::spawn_blocking(move || {
-                        crate::ui::thumbnail_cache::store(&path, mtime, &png);
+                        // Each larger decode of the same image would otherwise rewrite it.
+                        if crate::ui::thumbnail_cache::lookup(&path, mtime).is_none() {
+                            crate::ui::thumbnail_cache::store(&path, mtime, &png);
+                        }
                     })
                     .await;
                 }

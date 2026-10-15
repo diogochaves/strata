@@ -120,7 +120,13 @@ fn sniffed_svg_rejected_by_resvg_reaches_the_raster_loaders() {
     .expect("fixture");
     let source = crate::sandbox_helper::svg_source(&input).expect("sniffed as SVG");
     let resvg_error = svg(&source, 256).err().expect("resvg rejects it");
-    if let Err(error) = image(&input, 256) {
+    if let Err(error) = image(
+        &input,
+        ImagePreviewSize {
+            width: 256,
+            height: 256,
+        },
+    ) {
         assert_ne!(error, resvg_error);
     }
 }

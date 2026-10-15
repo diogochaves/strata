@@ -460,7 +460,7 @@ impl TextZoomScroll {
         if !modifiers.contains(Modifiers::CONTROL_MASK)
             || modifiers.intersects(Modifiers::ALT_MASK | Modifiers::SUPER_MASK)
             || dy == 0.0
-            || target.as_ref().is_some_and(inside_pdf_scroll)
+            || target.as_ref().is_some_and(inside_zoomable_preview)
         {
             self.reset();
             return Propagation::Proceed;
@@ -482,7 +482,7 @@ pub(super) fn handle_text_zoom_scroll(
     if !modifiers.contains(Modifiers::CONTROL_MASK)
         || modifiers.intersects(Modifiers::ALT_MASK | Modifiers::SUPER_MASK)
         || dy == 0.0
-        || target.as_ref().is_some_and(inside_pdf_scroll)
+        || target.as_ref().is_some_and(inside_zoomable_preview)
     {
         return Propagation::Proceed;
     }
@@ -521,10 +521,12 @@ fn visible_popover_menu(widget: &gtk::Widget) -> bool {
     false
 }
 
-fn inside_pdf_scroll(widget: &gtk::Widget) -> bool {
+/// PDF and image previews take Ctrl+scroll as their own zoom.
+fn inside_zoomable_preview(widget: &gtk::Widget) -> bool {
     let mut current = Some(widget.clone());
     while let Some(widget) = current {
-        if widget.has_css_class("preview-pdf-scroll") {
+        if widget.has_css_class("preview-pdf-scroll") || widget.has_css_class("preview-image-view")
+        {
             return true;
         }
         current = widget.parent();

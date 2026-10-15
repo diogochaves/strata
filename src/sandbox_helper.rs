@@ -17,7 +17,7 @@ use gtk::gio;
 use crate::{
     adapters::{encode_archive_result, list_archive_entries_direct},
     sandbox::{FILE_SIZE_LIMIT_BYTES, MAX_OUTPUT_BYTES, MediaPreviewBackend, PdfRenderSize},
-    services::{ArchiveFormat, MediaPreviewSize},
+    services::{ArchiveFormat, ImagePreviewSize, MediaPreviewSize},
 };
 
 mod appimage;
@@ -203,7 +203,14 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
             )?,
             None,
         ),
-        "preview-image" | "document-image" => (document_media::image(input, 800)?, None),
+        "preview-image" => (
+            document_media::image(input, image_preview_size(value)?)?,
+            None,
+        ),
+        "document-image" => (
+            document_media::image(input, ImagePreviewSize::DEFAULT)?,
+            None,
+        ),
         "document-mermaid" => (document_media::mermaid(input)?, None),
         "document-math" => (document_media::math(input, true)?, None),
         "document-inline-math" => (document_media::math(input, false)?, None),
@@ -431,8 +438,8 @@ pub(crate) fn browser_render(
         Operation::MediaMetadata => {
             response.metadata = read_media_metadata(input).unwrap_or_default()
         }
-        Operation::PreviewImage => {
-            response.png = document_media::image(input, 800).unwrap_or_default();
+        Operation::PreviewImage(size) => {
+            response.png = document_media::image(input, size).unwrap_or_default();
         }
         Operation::DocumentMermaid => {
             response.png = document_media::mermaid(input).unwrap_or_default();
@@ -554,18 +561,35 @@ fn image_dimensions(path: &Path) -> Option<(i32, i32)> {
 }
 
 fn render_pixbuf(path: &Path, size: i32) -> Result<Vec<u8>, String> {
-    if let Some((width, height)) = image_dimensions(path)
-        && exceeds_decoded_frame_budget(width, height)
+    render_pixbuf_at(path, size, size)
+}
+
+fn render_pixbuf_at(path: &Path, width: i32, height: i32) -> Result<Vec<u8>, String> {
+    if let Some((source_width, source_height)) = image_dimensions(path)
+        && exceeds_decoded_frame_budget(source_width, source_height)
     {
         return Err("Image dimensions exceed the decoded frame budget".to_owned());
     }
-    gdk_pixbuf::Pixbuf::from_file_at_scale(path, size, size, true)
+    gdk_pixbuf::Pixbuf::from_file_at_scale(path, width, height, true)
         .map_err(|error| error.to_string())?
         .save_to_bufferv("png", &[("compression", "1")])
         .map_err(|error| error.to_string())
 }
 
 fn render_raw(path: &Path, size: i32) -> Result<Vec<u8>, String> {
+    let edge = u32::try_from(size).unwrap_or(1);
+    render_raw_within(
+        path,
+        ImagePreviewSize {
+            width: edge,
+            height: edge,
+        },
+    )
+}
+
+fn render_raw_within(path: &Path, bounds: ImagePreviewSize) -> Result<Vec<u8>, String> {
+    // Square fallbacks get the box's short side so their output still fits it.
+    let square = bounds.width.min(bounds.height) as i32;
     // Preserve small sources so the preview can bound upscaling by their native dimensions.
     let info = image_dimensions(path);
     if let Some((width, height)) = info
@@ -573,16 +597,17 @@ fn render_raw(path: &Path, size: i32) -> Result<Vec<u8>, String> {
         && height > 0
     {
         if exceeds_decoded_frame_budget(width, height) {
-            if let Some(png) = read_exif_thumbnail(path, size) {
+            if let Some(png) = read_exif_thumbnail(path, square) {
                 return Ok(png);
             }
             return Err("Image dimensions exceed the decoded frame budget".to_owned());
         }
-        return render_pixbuf(path, size.min(width.max(height)))
-            .or_else(|_| render_imagemagick(path, size))
-            .or_else(|_| render_dcraw(path, size));
+        let (fit_width, fit_height) = bounds.fit(width as u32, height as u32);
+        return render_pixbuf_at(path, fit_width as i32, fit_height as i32)
+            .or_else(|_| render_imagemagick_within(path, bounds))
+            .or_else(|_| render_dcraw(path, square));
     }
-    render_imagemagick(path, size).or_else(|_| render_dcraw(path, size))
+    render_imagemagick_within(path, bounds).or_else(|_| render_dcraw(path, square))
 }
 
 fn render_raw_thumbnail(path: &Path, size: i32) -> Result<Vec<u8>, String> {
@@ -619,14 +644,25 @@ fn read_exif_thumbnail(path: &Path, size: i32) -> Option<Vec<u8>> {
 }
 
 fn render_imagemagick(path: &Path, size: i32) -> Result<Vec<u8>, String> {
+    let edge = u32::try_from(size).unwrap_or(1);
+    render_imagemagick_within(
+        path,
+        ImagePreviewSize {
+            width: edge,
+            height: edge,
+        },
+    )
+}
+
+fn render_imagemagick_within(path: &Path, bounds: ImagePreviewSize) -> Result<Vec<u8>, String> {
     for executable in ["magick", "convert"] {
         let output = bounded_output(
             Command::new(executable)
                 .arg(path)
                 .args(["-auto-orient", "-thumbnail"])
-                .arg(format!("{size}x{size}>"))
+                .arg(format!("{}x{}>", bounds.width, bounds.height))
                 .arg("png:-"),
-            MAX_OUTPUT_BYTES,
+            crate::sandbox::preview_image_output_limit(bounds),
         );
         if let Ok(output) = output
             && output.status.success()
@@ -903,6 +939,20 @@ fn pdf_render_request(value: &str) -> Result<(i32, PdfRenderSize), String> {
             .map_err(|_| "Invalid PDF preview dimensions".to_owned())
     };
     Ok((page, PdfRenderSize::new(parse(width)?, parse(height)?)))
+}
+
+/// `WIDTHxHEIGHT`, one edge for a square box, or `0` for the default box.
+fn image_preview_size(value: &str) -> Result<ImagePreviewSize, String> {
+    if value == "0" {
+        return Ok(ImagePreviewSize::DEFAULT);
+    }
+    let (width, height) = value.split_once('x').unwrap_or((value, value));
+    let parse = |dimension: &str| {
+        dimension
+            .parse::<i32>()
+            .map_err(|_| "Invalid image preview dimensions".to_owned())
+    };
+    Ok(ImagePreviewSize::new(parse(width)?, parse(height)?))
 }
 
 fn media_preview_size(value: &str) -> Result<MediaPreviewSize, String> {

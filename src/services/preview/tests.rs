@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 
 use super::{
-    ArchiveDirectory, ArchiveFileEntry, ArchiveNode, MediaPreviewSize, PreviewContent,
-    archive_preview_format, archive_preview_tree, bytes_support_named_family, content_family,
-    has_plain_text_extension, is_extensionless_dotfile, is_image_path, is_media_path,
-    is_non_executable_extensionless_dotfile, looks_like_text, normalize_preview_text,
-    reconcile_with_sample,
+    ArchiveDirectory, ArchiveFileEntry, ArchiveNode, ImagePreviewSize, MediaPreviewSize,
+    PreviewContent, archive_preview_format, archive_preview_tree, bytes_support_named_family,
+    content_family, has_plain_text_extension, is_extensionless_dotfile, is_image_path,
+    is_media_path, is_non_executable_extensionless_dotfile, looks_like_text,
+    normalize_preview_text, reconcile_with_sample,
 };
 
 #[test]
@@ -31,6 +31,27 @@ fn media_viewport_sizes_follow_display_scale_without_exceeding_the_pixel_budget(
         MediaPreviewSize::for_viewport(i32::MAX, i32::MAX, 2),
         MediaPreviewSize::new(1280, 1280)
     );
+}
+
+#[test]
+fn image_preview_boxes_follow_display_scale_within_the_pixel_budget() {
+    assert_eq!(
+        ImagePreviewSize::for_viewport(1000, 600, 2),
+        ImagePreviewSize {
+            width: 2000,
+            height: 1200
+        }
+    );
+    let capped = ImagePreviewSize::new(16_000, 8_000);
+    assert!(u64::from(capped.width) * u64::from(capped.height) <= ImagePreviewSize::MAX_PIXELS);
+    assert_eq!(capped.width / capped.height, 2);
+}
+
+#[test]
+fn image_previews_fit_their_box_without_enlarging_the_source() {
+    let pane = ImagePreviewSize::new(1500, 1500);
+    assert_eq!(pane.fit(6000, 4000), (1500, 1000));
+    assert_eq!(pane.fit(400, 300), (400, 300));
 }
 
 #[test]
@@ -637,6 +658,7 @@ fn password_request(password: Option<&str>) -> super::PreviewRequest {
         render_document: false,
         pdf_page: 0,
         media_size: MediaPreviewSize::new(640, 800),
+        image_size: crate::services::ImagePreviewSize::DEFAULT,
         model_palette: crate::services::ModelPalette::default(),
         archive_password: password.map(|password| super::SecretString::new(password.to_owned())),
     }

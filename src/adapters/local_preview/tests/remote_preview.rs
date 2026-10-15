@@ -29,6 +29,7 @@ fn request(path: &Path, name: &str) -> PreviewRequest {
         render_document: false,
         pdf_page: 0,
         media_size: MediaPreviewSize::new(640, 800),
+        image_size: crate::services::ImagePreviewSize::DEFAULT,
         model_palette: crate::services::ModelPalette::default(),
         archive_password: None,
     }
@@ -172,7 +173,7 @@ fn uri_images_stage_private_inputs_and_remove_them_after_rendering() {
                                 0o600
                             );
                             assert_eq!(path.extension(), original.extension());
-                            assert!(matches!(operation, ParseOperation::PreviewImage));
+                            assert!(matches!(operation, ParseOperation::PreviewImage(_)));
                             *rendered_path.lock().expect("path lock") = Some(path.to_owned());
                             if fail {
                                 Err("decoder failure".into())
